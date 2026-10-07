@@ -7,8 +7,6 @@ import shutil
 import tempfile
 import subprocess
 import datetime
-import base64
-import requests
 from io import BytesIO
 from xml.sax.saxutils import escape as xml_escape
 
@@ -32,81 +30,27 @@ COMPANY_NAMES = sorted(COMPANY_DATA.keys(), key=str.casefold)
 
 ADD_NEW_COMPANY = "➕ Add New Company"
 
-def _secret(name, default=""):
-    """Read a Streamlit secret safely. Returns default when not configured."""
-    try:
-        return str(st.secrets.get(name, default)).strip()
-    except Exception:
-        return default
+def add_company_for_current_session(company_name, address_lines):
+    """Add a company only to the current app session.
 
-def persist_company_to_github(company_name, address_lines):
-    """Persist a company into companies.json in the GitHub repo backing the app.
-
-    Expected Streamlit secrets:
-      GITHUB_TOKEN, GITHUB_REPO (owner/repo)
-    Optional:
-      GITHUB_BRANCH (default: main), GITHUB_COMPANIES_PATH (default: companies.json)
+    No API, GitHub write, or external persistence is used. The company is
+    immediately available for the current letter and current session.
     """
-    token = _secret("GITHUB_TOKEN")
-    repo = _secret("GITHUB_REPO")
-    branch = _secret("GITHUB_BRANCH", "main") or "main"
-    json_path = _secret("GITHUB_COMPANIES_PATH", "companies.json") or "companies.json"
+    clean_name = company_name.strip()
+    clean_address = [line.strip() for line in address_lines if line and line.strip()]
+    if not clean_name:
+        return False, "Please enter the company name."
+    if not clean_address:
+        return False, "Please enter at least one address line."
 
-    if not token or not repo:
-        return False, (
-            "GitHub persistence is not configured yet. Add GITHUB_TOKEN and "
-            "GITHUB_REPO in Streamlit App → Settings → Secrets."
-        )
-
-    api_url = f"https://api.github.com/repos/{repo}/contents/{json_path}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    try:
-        get_response = requests.get(
-            api_url, headers=headers, params={"ref": branch}, timeout=20
-        )
-        if get_response.status_code != 200:
-            return False, f"Could not read companies.json from GitHub ({get_response.status_code})."
-
-        payload = get_response.json()
-        current_content = base64.b64decode(payload["content"]).decode("utf-8")
-        github_data = json.loads(current_content)
-
-        # Avoid creating a second key that differs only by capitalization.
-        existing_name = next(
-            (name for name in github_data if name.casefold() == company_name.casefold()),
-            None,
-        )
-        if existing_name:
-            company_name = existing_name
-
-        github_data[company_name] = address_lines
-        new_content = json.dumps(github_data, ensure_ascii=False, indent=2) + "\n"
-
-        put_payload = {
-            "message": f"Add/update company: {company_name}",
-            "content": base64.b64encode(new_content.encode("utf-8")).decode("ascii"),
-            "sha": payload["sha"],
-            "branch": branch,
-        }
-        put_response = requests.put(
-            api_url, headers=headers, json=put_payload, timeout=20
-        )
-        if put_response.status_code not in (200, 201):
-            detail = ""
-            try:
-                detail = put_response.json().get("message", "")
-            except Exception:
-                pass
-            return False, f"GitHub save failed ({put_response.status_code}). {detail}".strip()
-
-        return True, company_name
-    except Exception as exc:
-        return False, f"GitHub save failed: {exc}"
+    existing_name = next(
+        (name for name in st.session_state.company_data
+         if name.casefold() == clean_name.casefold()),
+        None,
+    )
+    save_name = existing_name or clean_name
+    st.session_state.company_data[save_name] = clean_address
+    return True, save_name
 
 OFFICIALS = {
     "Director": {
@@ -606,9 +550,9 @@ for i, row in enumerate(st.session_state.companies):
     selected = st.session_state[company_key]
 
     if selected == ADD_NEW_COMPANY:
-        st.info("Add the company once; it will be saved to the shared company list for future users.")
+        st.info("Company not in the list? Type the company name and address below. It will be used directly for this letter — no API or GitHub save is required.")
         new_name = st.text_input(
-            "New company name",
+            "Company name",
             key=f"new_company_name_{i}",
             placeholder="Example: ABC Limited",
         ).strip()
@@ -617,43 +561,27 @@ for i, row in enumerate(st.session_state.companies):
         for j, col in enumerate((n1, n2, n3)):
             with col:
                 value = st.text_input(
-                    f"New address line {j+1}",
+                    f"Address line {j+1}",
                     key=f"new_company_addr_{i}_{j}",
                     placeholder="Address line",
                 ).strip()
                 new_address.append(value)
 
-        if st.button("Save New Company", key=f"save_new_company_{i}", type="primary"):
-            clean_address = [line for line in new_address if line]
-            if not new_name:
-                st.error("Please enter the new company name.")
-            elif not clean_address:
-                st.error("Please enter at least one address line.")
+        if st.button("Use This Company", key=f"save_new_company_{i}", type="primary"):
+            ok, result = add_company_for_current_session(new_name, new_address)
+            if ok:
+                padded = [line.strip() for line in new_address][:3]
+                padded += [""] * (3 - len(padded))
+                st.session_state.companies[i] = {"name": result, "address": padded}
+                for j in range(3):
+                    st.session_state[f"addr_{i}_{j}"] = padded[j]
+                st.session_state[pending_key] = result
+                st.success(f"✓ {result} added for this letter. No API/GitHub save was used.")
+                st.rerun()
             else:
-                # Preserve existing capitalization when the same name already exists.
-                existing_name = next(
-                    (name for name in company_db if name.casefold() == new_name.casefold()),
-                    None,
-                )
-                save_name = existing_name or new_name
+                st.error(result)
 
-                with st.spinner("Saving company to the shared list..."):
-                    ok, result = persist_company_to_github(save_name, clean_address)
-
-                if ok:
-                    save_name = result
-                    st.session_state.company_data[save_name] = clean_address
-                    padded = clean_address[:3] + [""] * (3 - len(clean_address[:3]))
-                    st.session_state.companies[i] = {"name": save_name, "address": padded}
-                    for j in range(3):
-                        st.session_state[f"addr_{i}_{j}"] = padded[j]
-                    st.session_state[pending_key] = save_name
-                    st.success(f"✓ {save_name} saved to companies.json and added to the dropdown.")
-                    st.rerun()
-                else:
-                    st.error(result)
-
-        # Do not show the normal editable-address fields until the new company is saved.
+        # Do not show the normal editable-address fields until the company is accepted.
         continue
 
     if selected in company_db:
