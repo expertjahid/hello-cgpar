@@ -453,18 +453,26 @@ major_map = {
 }
 major = st.selectbox("Major", major_map[school])
 
-# SBE uses the existing eligibility list. Other schools allow manual student entry.
+# SBE uses the existing eligibility list by default. If an ID is not found,
+# the user can explicitly choose the separate (NOT SBE) option for manual entry.
 is_sbe = school.startswith("School of Business")
+if "not_sbe_manual" not in st.session_state:
+    st.session_state.not_sbe_manual = False
+
 student_id = st.text_input(
     "Student ID",
     placeholder="Example: 2330737",
-    help="For SBE, the existing eligibility list is used. For other schools, enter the student's ID manually."
+    help="SBE students are checked against the eligibility list first. If the ID is not found, choose (NOT SBE) for manual entry."
 ).strip()
+
+# If the user changes away from SBE, manual entry is automatically enabled.
+if not is_sbe:
+    st.session_state.not_sbe_manual = True
 
 record = STUDENT_DATA.get(student_id) if is_sbe else None
 can_generate = False
 
-if is_sbe:
+if is_sbe and not st.session_state.not_sbe_manual:
     if record:
         state, status, color, can_generate = classify_student(record)
         if state == "eligible":
@@ -487,13 +495,32 @@ if is_sbe:
         student_name = ""
         if student_id:
             st.error("✕ Student ID not found in the SBE eligibility list.")
+            if st.button("(NOT SBE)", key="not_sbe_button", use_container_width=True):
+                st.session_state.not_sbe_manual = True
+                st.rerun()
+            st.caption("If this student is not in the SBE eligibility list, select (NOT SBE) to enter the name and ID manually.")
         else:
             st.info("Enter Student ID to check the SBE eligibility list.")
+elif is_sbe and st.session_state.not_sbe_manual:
+    st.info("(NOT SBE) selected — manual student entry is enabled.")
+    if st.button("↩ Use SBE Eligibility List", key="use_sbe_list", use_container_width=True):
+        st.session_state.not_sbe_manual = False
+        st.rerun()
+    student_name = st.text_input(
+        "Student Name",
+        placeholder="Enter student's full name",
+        key="manual_student_name"
+    ).strip()
+    can_generate = bool(student_id and student_name)
+    st.caption("✓ Manual Name + ID entry enabled.")
+    if student_id and student_name:
+        st.success("✓ Student details accepted for manual entry.")
 else:
     can_generate = bool(student_id)
     student_name = st.text_input(
         "Student Name",
-        placeholder="Enter student's full name"
+        placeholder="Enter student's full name",
+        key="manual_student_name_other_school"
     ).strip()
     st.caption("✓ Manual entry enabled for non-SBE schools.")
     if student_id and student_name:
